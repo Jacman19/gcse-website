@@ -1,0 +1,600 @@
+<!doctype html>
+<html>
+  <head>
+    <link href="6502style.css" rel="stylesheet" type="text/css" />
+    <title>6502 assembler/simulator</title>
+  </head>
+  <body>
+
+    <div class="widget">
+      <div class="buttons">
+        <input type="button" value="Assemble" class="assembleButton" />
+        <input type="button" value="Run" class="runButton" />
+        <input type="button" value="Reset" class="resetButton" />
+        <input type="button" value="Hexdump" class="hexdumpButton" />
+        <input type="button" value="Disassemble" class="disassembleButton" />
+        <input type="button" value="Notes" class="notesButton" />
+      </div>
+
+      <textarea class="code">; Little snake game written in 6502 assembly,
+; intended for a vm like the one at http://6502asm.com or http://skilldrick.github.io/easy6502/
+; Play with Sleep: if it runs too fast / slow
+
+; memory layout:
+; $00-$01 temp, sometimes points to video RAM base or current pixel address
+; $02 pixel color info
+; $03 snake section count 
+; $04-$1f various variables
+; $20-$5f x coords of snake sections
+; $60-$9f y coords of snake sections
+
+NewGame:
+jsr Sleep
+; reset the stack pointer
+ldx #$ff
+txs
+
+jsr ClearScreen
+
+; draw the snake
+lda #00
+ldx #15
+ldy #15
+jsr PlotPixel
+
+; put the snake part count in memory $03
+lda #01	; (start with just the head)
+sta $03
+
+; put snake head link 1 x at memory $20, y at $60
+stx $20 ; snake head x
+sty $60 ; snake head y
+
+; add a few sections to the snake head
+jsr AddSection
+jsr AddSection
+jsr AddSection
+
+jsr SpawnFruit
+
+jmp noreturn
+
+FruitXmatches: ; used when the snake's head is in the same column as the fruit piece
+	lda $60		; check snake head row against fruit row
+	cmp $19
+	bne doneCheckingForFruit
+	; fruit matches
+	jsr SpawnFruit ; spawn a new piece of fruit (erases the old one)
+	jsr AddSection	; add another piece to the snake
+
+	jmp doneCheckingForFruit
+
+	; noreturn is the main game loop
+noreturn:
+; check snake head vs fruit location
+lda $20
+cmp $18
+beq FruitXmatches
+
+doneCheckingForFruit:
+
+; redraw fruit, just in case
+ldx $18
+ldy $19
+lda #5
+jsr PlotPixel
+; wait for player to press right, up, down, or left
+; read key press
+lda $ff
+cmp #97 ; a key
+beq leftkeypressed
+lda $ff
+cmp #100 ; d key
+beq rightkeypressed
+lda $ff
+cmp #119 ; w key
+beq upkeypressed
+lda $ff
+cmp #115 ; s key
+beq downkeypressed
+jsr Sleep
+jmp noreturn
+
+leftkeypressed:
+jsr AdvanceSnakeLeft
+jsr Sleep
+jmp noreturn
+
+rightkeypressed:
+jsr AdvanceSnakeRight
+jsr Sleep
+jmp noreturn
+
+downkeypressed:
+jsr AdvanceSnakeDown
+jsr Sleep
+jmp noreturn
+
+upkeypressed:
+jsr AdvanceSnakeUp
+jsr Sleep
+jmp noreturn
+
+
+
+GameOver:
+jsr LongSleep
+jmp NewGame
+
+
+; do a little bupkiss
+Sleep:
+	ldx #2
+	outerloop:
+	; ldy #175
+	lda #220
+	sbc $03		; subtract section count from iteration count a few times
+	sbc $03		; so the game will get faster as it goes on (instead of slower)
+	sbc $03
+	sbc $03
+	sbc $03
+	sbc $03
+	sbc $03
+	clc
+	innerloop:
+	sbc #1
+	 bne innerloop
+
+	dex
+	 bne outerloop
+	 
+	rts
+
+
+; do a whole lotta bupkiss
+LongSleep:
+	 ldx #20
+	lsouterloop:
+	 ldy #255
+	lsinnerloop:
+	 dey
+	 bne lsinnerloop
+
+	dex
+	 bne lsouterloop
+	 
+	rts
+
+; update all the trailing snake sections to follow the head
+;x and y registers store x and y of new head
+FollowSnake:
+; save x and y
+stx $06
+sty $07
+; copy section count
+lda $03
+sta $04
+
+; store memory addr of piece 1 x at $08, piece 1 y at $10
+lda #$20
+sta $08
+lda #$60
+sta $10
+lda #0
+sta $09
+sta $11
+
+updateSnake:
+jsr updateSection
+dec $04
+bne updateSnake
+rts
+
+; $04 has number of current piece
+updateSection:
+	; is the current piece the last piece?
+	lda $03
+	cmp $04
+	bne doneWithErasing
+
+	; we're updating the last tail piece so we need to erase the pixel at it's (old) position
+	; get x and y of current piece
+	lda $04 ; put index of current piece in y
+	tay
+	dey
+	lda ($08),y ; get x coord of current snake piece
+	pha ; and push it on the stack
+
+	lda ($10),y ; get y coord
+	tay
+	pla
+	tax
+	lda #1
+	; erase pixel
+	jsr PlotPixel
+
+	; update x and y to point to new x and y
+
+	doneWithErasing:
+
+	; get the x,y of the previous section and copy it to this section's x,y
+	ldy $04
+	dey
+	bne notTheFirst ; does the copying, except for the head
+
+	; copy new x and y to head piece
+	;ldx $06
+	;ldy $07
+	;stx $20
+	;sty $60
+	rts
+
+notTheFirst:
+	ldy $04
+	dey
+	dey
+	; load x,y values of prev section
+	lda ($08),y
+	pha
+	lda ($10),y
+	;pha
+	; overwrite x,y values of current section w/ previous x,y
+	iny
+	;pla
+	sta ($10),y
+	pla
+	sta ($08),y
+
+	rts
+
+
+AdvanceSnakeRight:
+; holy shit assembly is tough
+
+; ld snake x and y
+ldx $20
+ldy $60
+
+; plot black to the right of head
+lda #0
+inx ; increase x
+cpx #32
+bne continueRight
+jmp GameOver
+
+continueRight:
+;jsr PlotPixel
+
+jsr FollowSnake
+
+; increase x of head
+inc $20
+jsr CheckForDeath
+
+rts
+
+
+
+AdvanceSnakeLeft:
+
+; ld snake x and y
+ldx $20
+ldy $60
+
+; plot black to the left of head
+lda #0
+cpx #0
+bne continueLeft
+jmp GameOver
+
+continueLeft:
+dex ; decrease x
+;jsr PlotPixel
+
+jsr FollowSnake
+
+; decrease x of head
+dec $20
+
+jsr CheckForDeath
+
+rts
+
+
+
+AdvanceSnakeDown:
+; holy shit assembly is tough
+
+; ld snake x and y
+ldx $20
+ldy $60
+
+; plot black underneath head
+lda #0
+iny ; increase y
+cpy #32
+bne continueDn
+jmp GameOver
+
+continueDn:
+;jsr PlotPixel
+
+jsr FollowSnake
+
+; increase y of head
+inc $60
+
+jsr CheckForDeath
+
+rts
+
+
+
+AdvanceSnakeUp:
+
+; ld snake x and y
+ldx $20
+ldy $60
+
+; plot black above head
+lda #0
+cpy #0
+bne continueUp
+jmp GameOver
+
+continueUp:
+dey ; decrease y
+;jsr PlotPixel
+
+
+jsr FollowSnake
+
+; decrease y of head
+dec $60
+
+jsr CheckForDeath
+
+rts
+
+
+
+SpawnFruit:
+; read random number for x
+lda $fe
+and #31
+; store fruit x, y at $18, $19
+sta $18
+lda $fe
+and #31
+sta $19
+
+ldx $18
+ldy $19
+; plot this sucker
+lda #$05
+jsr PlotPixel
+
+rts
+
+
+AddSection:
+; do nothing if there's already 31 sections
+lda #31
+clc
+cmp $03
+bcs goOnAdding
+rts
+goOnAdding:
+; write x and y memory locations to $08 and $10
+lda #0
+sta $09
+sta $11
+lda #$20
+sta $08
+lda #60
+sta $10
+
+; ld section count
+ldy $03
+lda ($08),y
+pha
+lda ($10),y
+iny
+sta ($10),y
+pla
+sta ($08),y
+inc $03
+
+rts
+
+
+; see if the head is on a black pixel
+; if it is, gameover. If not, draw the head
+CheckForDeath:
+; load x and y of head
+ldx $20
+ldy $60
+jsr ReadPixel
+
+cmp #0
+bne drawHead
+
+jmp GameOver
+
+drawHead:
+ldx $20
+ldy $60
+lda #0
+jsr PlotPixel
+
+rts
+
+
+
+; take x,y coords in x,y regs
+; return color in lda
+ReadPixel:
+
+; store $0200 into address 0-1
+lda #00
+sta $00
+lda #02
+sta $01
+
+; y coord is in y register, for every y, increase memory location by 32
+cpy #0
+jmp rpxCompareY
+
+rpxSubtractY:
+lda $00
+clc
+adc #$20
+bcc rpxGoOnThen
+
+;carry set, inc $01
+inc $01
+
+rpxGoOnThen:
+sta $00
+dey
+
+rpxCompareY:
+bne rpxSubtractY
+
+
+; move x to memory $02 then to y
+stx $02
+ldy $02
+
+lda ($00),Y ; read the pixel
+
+rts
+
+
+
+
+
+
+; x,y in x,y regs
+; color in a
+PlotPixel:
+	pha ; push the value of a onto the stack
+
+	; store $0200 (vid mem address) into address 0-1
+	lda #00
+	sta $00
+	lda #02
+	sta $01
+
+	; y coord is in y register, for every y, increase memory location by 32
+	cpy #0
+	jmp compareY
+
+	subtractY:
+	lda $00
+	clc
+	adc #$20
+	bcc goOnThen
+
+	;carry set, inc $01
+	inc $01
+
+	goOnThen:
+	sta $00
+	dey
+
+	compareY:
+	bne subtractY
+
+
+	;restore color 
+	pla
+
+	; move x to memory $02 then to y
+	stx $02
+	ldy $02
+
+	sta ($00),Y ; plot the pixel
+
+	rts
+
+
+ClearScreen:
+	; store color 1 into address 2
+	lda #01
+	sta $02
+
+	ldy #8
+	; load color into a
+	lda $2
+	; load 32 into x
+	ldx #32
+	outputColor:
+	; store color into video memory
+	dex
+	sta $200,x
+	sta $220,x
+	sta $240,x
+	sta $260,x
+	sta $280,x
+	sta $2a0,x
+	sta $2c0,x
+	sta $2e0,x
+	sta $300,x
+	sta $320,x
+	sta $340,x
+	sta $360,x
+	sta $380,x
+	sta $3a0,x
+	sta $3c0,x
+	sta $3e0,x
+	sta $400,x
+	sta $420,x
+	sta $440,x
+	sta $460,x
+	sta $480,x
+	sta $4a0,x
+	sta $4c0,x
+	sta $4e0,x
+	sta $500,x
+	sta $520,x
+	sta $540,x
+	sta $560,x
+	sta $580,x
+	sta $5a0,x
+	sta $5c0,x
+	sta $5e0,x
+	bne outputColor
+
+	rts</textarea>
+
+      <canvas class="screen" width="160" height="160"></canvas>
+
+      <div class="debugger">
+        <input type="checkbox" class="debug" name="debug" />
+        <label for="debug">Debugger</label>
+        <div class="minidebugger"></div>
+        <div class="buttons">
+          <input type="button" value="Step" class="stepButton" />
+          <input type="button" value="Jump to ..." class="gotoButton" />
+        </div>
+      </div>
+
+      <div class="monitorControls">
+        <label for="monitoring">Monitor</label>
+        <input type="checkbox" class="monitoring" name="monitoring" />
+
+        <label for="start">Start: $</label>
+        <input type="text" value="0" class="start" name="start" />
+        <label for="length">Length: $</label>
+        <input type="text" value="ff" class="length" name="length" />
+      </div>
+      <div class="monitor"><pre><code></code></pre></div>
+      <div class="messages"><pre><code></code></pre></div>
+      <a href="..\index.html">Back</a>
+
+    <script src="es5-shim.js"></script>
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.7.2/jquery.min.js"></script>
+    <script src="assembler.js"></script>
+  </body>
+</html>
